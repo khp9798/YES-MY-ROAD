@@ -24,12 +24,14 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
   CameraController? _cameraController;
   DetectionService? _detectionService;
   StreamSubscription? _subscription;
+  StreamSubscription? _positionSubscription;
   final ApiService _apiService = ApiService();
   final FrameRateTester _frameRateTester = FrameRateTester();
 
   int _detectionCount = 0;
   int _frameSkip = 30;
   int _frameCounter = 0;
+  double _currentSpeed = 0.0;
 
   List<String> _detectedClasses = [];
   List<List<double>> _boundingBoxes = [];
@@ -37,12 +39,47 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
 
   final StreamController<DetectionResult> _uploadQueue = StreamController<DetectionResult>();
 
+  Timer? _monitorTimer;
+  Map<String, dynamic> _queueStatus = {
+    'queueSize': 0,
+    'maxQueueSize': 12,
+    'isProcessing': false,
+    'lastProcessingTime': 0,
+    'averageProcessingTime': 0.0,
+    'maxProcessingTime': 0.0,
+  };
+  List<int> _queueSizeHistory = [];
+  List<int> _processingTimeHistory = [];
+
+  bool _showQueueMonitor = true;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initializeSystem();
     _uploadQueue.stream.listen(_uploadDetection);
+
+    _monitorTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
+      if (_detectionService != null) {
+        final status = _detectionService!.getQueueStatus();
+        setState(() {
+          _queueStatus = status;
+
+          _queueSizeHistory.add(status['queueSize'] as int);
+          if (_queueSizeHistory.length > 50) {
+            _queueSizeHistory.removeAt(0);
+          }
+
+          if (status['lastProcessingTime'] > 0) {
+            _processingTimeHistory.add(status['lastProcessingTime'] as int);
+            if (_processingTimeHistory.length > 50) {
+              _processingTimeHistory.removeAt(0);
+            }
+          }
+        });
+      }
+    });
   }
 
   @override
@@ -56,6 +93,7 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
 
   void _initializeSystem() async {
     await _initializeCamera();
+    _startSpeedTracking();
 
     DetectionService.initialize().then((detector) {
       setState(() {
@@ -81,6 +119,9 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
       await _cameraController!.initialize();
       await _cameraController!.setFlashMode(FlashMode.off);
 
+      await _cameraController!.setFocusMode(FocusMode.auto);
+
+      await _cameraController!.setExposureMode(ExposureMode.auto);
 
       if (_cameraController!.value.isInitialized) {
         ScreenUtils.setPreviewSize(_cameraController!.value.previewSize!);
@@ -89,9 +130,43 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
       await _cameraController!.startImageStream(_processFrame);
 
       setState(() {});
-
     } catch (e) {
       debugPrint('카메라 초기화 오류: $e');
+    }
+  }
+
+  void _startSpeedTracking() {
+    _positionSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 1,
+      ),
+    ).listen((Position position) {
+      if (position.speed > 0) {
+        setState(() {
+          _currentSpeed = position.speed * 3.6;
+        });
+        _updateFrameSkipBasedOnSpeed();
+      }
+    });
+  }
+
+  void _updateFrameSkipBasedOnSpeed() {
+    int newFrameSkip;
+
+    if (_currentSpeed < 20) {
+      newFrameSkip = 15;
+    } else if (_currentSpeed < 50) {
+      newFrameSkip = 7;
+    } else {
+      newFrameSkip = 3;
+    }
+
+    if (_frameSkip != newFrameSkip) {
+      setState(() {
+        _frameSkip = newFrameSkip;
+      });
+      debugPrint('속도: ${_currentSpeed.toStringAsFixed(1)} km/h, 프레임 스킵: ${_frameSkip + 1}');
     }
   }
 
@@ -201,10 +276,180 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
     _cameraController?.stopImageStream();
     _detectionService?.stop();
     _subscription?.cancel();
+    _positionSubscription?.cancel();
+  }
+
+  Widget _buildQueueVisualization() {
+    Color queueColor;
+    if (_queueStatus['queueSize'] > _queueStatus['maxQueueSize'] * 0.8) {
+      queueColor = Colors.red;
+    } else if (_queueStatus['queueSize'] > _queueStatus['maxQueueSize'] * 0.5) {
+      queueColor = Colors.orange;
+    } else {
+      queueColor = Colors.green;
+    }
+
+    final processingColor = _queueStatus['isProcessing'] ? Colors.blue : Colors.grey;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                '큐 모니터링',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+              ),
+              GestureDetector(
+                onTap: () {
+                  setState(() {
+                    _showQueueMonitor = !_showQueueMonitor;
+                  });
+                },
+                child: Icon(
+                  _showQueueMonitor ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                  color: Colors.white,
+                  size: 20,
+                ),
+              ),
+            ],
+          ),
+
+          if (_showQueueMonitor) ...[
+            const SizedBox(height: 8),
+
+            Text(
+              '큐 상태: ${_queueStatus['queueSize']}/${_queueStatus['maxQueueSize']} ${_queueStatus['isProcessing'] ? '(처리 중)' : '(대기 중)'}',
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+
+            Container(
+              width: double.infinity,
+              height: 24,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade800,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: MediaQuery.of(context).size.width * 0.7 *
+                        (_queueStatus['queueSize'] / _queueStatus['maxQueueSize']),
+                    decoration: BoxDecoration(
+                      color: queueColor,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                  if (_queueStatus['isProcessing'])
+                    Container(
+                      width: 4,
+                      color: processingColor,
+                    ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 8),
+
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '마지막: ${_queueStatus['lastProcessingTime']}ms',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+                Text(
+                  '평균: ${_queueStatus['averageProcessingTime'].toStringAsFixed(1)}ms',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+                Text(
+                  '최대: ${_queueStatus['maxProcessingTime'].toStringAsFixed(1)}ms',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 8),
+
+            SizedBox(
+              height: 50,
+              child: _buildHistoryGraph(_queueSizeHistory, Colors.cyan, _queueStatus['maxQueueSize'].toDouble()),
+            ),
+
+            const SizedBox(height: 4),
+            const Text(
+              '큐 크기 변화',
+              style: TextStyle(color: Colors.white70, fontSize: 10),
+            ),
+
+            const SizedBox(height: 8),
+
+            SizedBox(
+              height: 50,
+              child: _buildHistoryGraph(_processingTimeHistory, Colors.amber, 1000),
+            ),
+
+            const SizedBox(height: 4),
+            const Text(
+              '처리 시간 변화 (ms)',
+              style: TextStyle(color: Colors.white70, fontSize: 10),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHistoryGraph(List<int> history, Color color, double maxValue) {
+    if (history.isEmpty) {
+      return Container();
+    }
+
+    return CustomPaint(
+      size: Size.infinite,
+      painter: _HistoryGraphPainter(
+        history: history,
+        color: color,
+        maxValue: maxValue,
+      ),
+    );
+  }
+
+  Widget _buildStatusItem(String label, String value) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
   }
 
   @override
   void dispose() {
+    _monitorTimer?.cancel();
     _stopDetection();
     WidgetsBinding.instance.removeObserver(this);
     _frameRateTester.stopTesting();
@@ -228,11 +473,10 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
       body: Stack(
         fit: StackFit.expand,
         children: [
-
           CameraPreview(_cameraController!),
 
           Positioned(
-            top: MediaQuery.of(context).padding.top + 10, // 상태바 아래로 10px
+            top: MediaQuery.of(context).padding.top + 10,
             left: 10,
             child: IconButton(
               icon: const Icon(
@@ -245,8 +489,101 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
               },
             ),
           ),
+
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 50,
+            left: 20,
+            right: 20,
+            child: _buildQueueVisualization(),
+          ),
+
+          Positioned(
+            bottom: 20,
+            left: 20,
+            right: 20,
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _buildStatusItem('속도', '${_currentSpeed.toStringAsFixed(1)} km/h'),
+                  _buildStatusItem('감지', '$_detectionCount'),
+                  _buildStatusItem('프레임 스킵', '${_frameSkip + 1}'),
+                  _buildStatusItem('FPS', '${_frameRateTester.currentFps}'),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
+  }
+}
+
+class _HistoryGraphPainter extends CustomPainter {
+  final List<int> history;
+  final Color color;
+  final double maxValue;
+
+  _HistoryGraphPainter({
+    required this.history,
+    required this.color,
+    required this.maxValue,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    final fillPaint = Paint()
+      ..color = color.withOpacity(0.2)
+      ..style = PaintingStyle.fill;
+
+    final path = Path();
+    final fillPath = Path();
+
+    if (history.isEmpty) return;
+
+    final xStep = size.width / (history.length - 1);
+
+    double startX = 0;
+    double startY = size.height - (history.first / maxValue * size.height);
+    path.moveTo(startX, startY);
+    fillPath.moveTo(startX, size.height);
+    fillPath.lineTo(startX, startY);
+
+    for (int i = 1; i < history.length; i++) {
+      final x = i * xStep;
+      final y = size.height - (history[i] / maxValue * size.height);
+      path.lineTo(x, y);
+      fillPath.lineTo(x, y);
+    }
+
+    fillPath.lineTo(size.width, size.height);
+    fillPath.close();
+
+    canvas.drawPath(fillPath, fillPaint);
+    canvas.drawPath(path, paint);
+
+    final gridPaint = Paint()
+      ..color = Colors.white30
+      ..strokeWidth = 0.5;
+
+    for (int i = 1; i <= 3; i++) {
+      final y = size.height * (1 - i / 4);
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_HistoryGraphPainter oldDelegate) {
+    return oldDelegate.history != history;
   }
 }

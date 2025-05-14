@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:isolate';
 import 'dart:typed_data';
+import 'dart:collection';
 import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -35,19 +36,49 @@ class DetectionService {
 
   static Future<Interpreter> _loadModel() async {
     try {
-      final interpreterOptions = InterpreterOptions()..threads = 2;
-      interpreterOptions.addDelegate(XNNPackDelegate());
+      final interpreterOptions = InterpreterOptions();
+
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        try {
+          interpreterOptions.useNnApiForAndroid = true;
+          debugPrint('NNAPI Delegate 활성화 시도 (useNnApiForAndroid = true 사용)');
+        } catch (e) {
+          debugPrint('useNnApiForAndroid 설정 중 예외 발생: $e');
+          debugPrint('XNNPack Delegate로 fallback 시도');
+          interpreterOptions.addDelegate(XNNPackDelegate());
+        }
+      } else {
+        debugPrint('Android 플랫폼이 아니므로 XNNPack Delegate 사용');
+        interpreterOptions.addDelegate(XNNPackDelegate());
+      }
+
+      interpreterOptions.threads = 4;
 
       debugPrint('모델 로드 시도: $_modelPath');
       final interpreter = await Interpreter.fromAsset(
         _modelPath,
         options: interpreterOptions,
       );
+
       debugPrint('모델 로드 성공: 입력 텐서 크기 ${interpreter.getInputTensors().first.shape}');
       return interpreter;
+
     } catch (e) {
-      debugPrint('모델 로드 실패: $e');
-      rethrow;
+      debugPrint('모델 로드 중 최종 오류 발생 (useNnApiForAndroid 사용 시도 포함): $e');
+      debugPrint('Delegate 없이 CPU로 모델 재로드 시도...');
+      try {
+        final cpuOptions = InterpreterOptions()..threads = 2;
+
+        final interpreter = await Interpreter.fromAsset(
+          _modelPath,
+          options: cpuOptions,
+        );
+        debugPrint('Delegate 없이 CPU로 모델 로드 성공');
+        return interpreter;
+      } catch (e2) {
+        debugPrint('Delegate 없이 CPU로 모델 로드도 실패: $e2');
+        rethrow;
+      }
     }
   }
 
@@ -55,17 +86,31 @@ class DetectionService {
     return (await rootBundle.loadString(_labelPath)).split('\n');
   }
 
-  DetectionService._(this._isolate, this._interpreter, this._labels);
+  DetectionService._(this._isolate, this._interpreter, this._labels) {
+    _frameQueue = FrameQueue(this);
+  }
 
   final Isolate _isolate;
   final Interpreter _interpreter;
   final List<String> _labels;
+  late final FrameQueue _frameQueue;
 
   late final SendPort _sendPort;
   bool _isReady = false;
 
   final StreamController<Map<String, dynamic>> resultsStream =
   StreamController<Map<String, dynamic>>();
+
+  Map<String, dynamic> getQueueStatus() {
+    return {
+      'queueSize': _frameQueue.queueLength,
+      'maxQueueSize': _frameQueue.maxQueueSize,
+      'isProcessing': _frameQueue.isProcessing,
+      'lastProcessingTime': _frameQueue.lastProcessingTime,
+      'averageProcessingTime': _frameQueue.averageProcessingTime,
+      'maxProcessingTime': _frameQueue.maxProcessingTime,
+    };
+  }
 
   void _handleCommand(Map<String, dynamic> command) {
     final _Command code = command['code'];
@@ -82,6 +127,7 @@ class DetectionService {
         break;
       case _Command.ready:
         _isReady = true;
+        _frameQueue.setReady();
         break;
       case _Command.busy:
         _isReady = false;
@@ -89,6 +135,7 @@ class DetectionService {
       case _Command.result:
         _isReady = true;
         resultsStream.add(args[0] as Map<String, dynamic>);
+        _frameQueue.setReady();
         break;
       default:
         debugPrint('Unknown command: $code');
@@ -96,17 +143,91 @@ class DetectionService {
   }
 
   void processFrame(CameraImage cameraImage) {
-    if (_isReady) {
-      _sendPort.send({
-        'code': _Command.detect,
-        'args': [cameraImage],
-      });
-    }
+    _frameQueue.addFrame(cameraImage);
   }
 
   void stop() {
     _isolate.kill();
+    resultsStream.close();
   }
+}
+
+class FrameQueue {
+  final int maxQueueSize = 12;
+  final Queue<_FrameTask> _queue = Queue<_FrameTask>();
+  bool _isProcessing = false;
+  final DetectionService _service;
+
+  int _lastProcessingTime = 0;
+  final List<int> _processingTimes = [];
+  DateTime? _processingStartTime;
+
+  FrameQueue(this._service);
+
+  void addFrame(CameraImage frame) {
+    if (_queue.length >= maxQueueSize) {
+      _queue.removeFirst();
+    }
+
+    _queue.add(_FrameTask(
+      frame: frame,
+      timestamp: DateTime.now(),
+    ));
+
+    if (_queue.length % 5 == 0) {
+      debugPrint('프레임 큐 상태: ${_queue.length}/$maxQueueSize');
+    }
+
+    _processNextFrameIfReady();
+  }
+
+  void _processNextFrameIfReady() {
+    if (_isProcessing || _queue.isEmpty || !_service._isReady) return;
+
+    _isProcessing = true;
+    final task = _queue.removeFirst();
+
+    _processingStartTime = DateTime.now();
+
+    _service._sendPort.send({
+      'code': _Command.detect,
+      'args': [task.frame],
+    });
+  }
+
+  void setReady() {
+    if (_isProcessing && _processingStartTime != null) {
+      final now = DateTime.now();
+      _lastProcessingTime = now.difference(_processingStartTime!).inMilliseconds;
+
+      _processingTimes.add(_lastProcessingTime);
+      if (_processingTimes.length > 10) {
+        _processingTimes.removeAt(0);
+      }
+    }
+
+    _isProcessing = false;
+    _processNextFrameIfReady();
+  }
+
+  int get queueLength => _queue.length;
+  bool get isProcessing => _isProcessing;
+  int get lastProcessingTime => _lastProcessingTime;
+  double get averageProcessingTime {
+    if (_processingTimes.isEmpty) return 0;
+    return _processingTimes.reduce((a, b) => a + b) / _processingTimes.length;
+  }
+  double get maxProcessingTime {
+    if (_processingTimes.isEmpty) return 0;
+    return _processingTimes.reduce(math.max).toDouble();
+  }
+}
+
+class _FrameTask {
+  final CameraImage frame;
+  final DateTime timestamp;
+
+  _FrameTask({required this.frame, required this.timestamp});
 }
 
 class _DetectorIsolate {
@@ -121,14 +242,29 @@ class _DetectorIsolate {
     final ReceivePort receivePort = ReceivePort();
     final _DetectorIsolate isolate = _DetectorIsolate(sendPort);
 
-    receivePort.listen((message) async {
-      final Map<String, dynamic> command = message as Map<String, dynamic>;
-      await isolate._handleCommand(command);
-    });
-
     sendPort.send({
       'code': _Command.init,
       'args': [receivePort.sendPort],
+    });
+
+    receivePort.listen((message) async {
+      if (message is Map<String, dynamic>) {
+        final _Command code = message['code'];
+        final args = message['args'];
+
+        if (code == _Command.init) {
+          final rootIsolateToken = args[0] as RootIsolateToken;
+          BackgroundIsolateBinaryMessenger.ensureInitialized(rootIsolateToken);
+
+          isolate._interpreter = Interpreter.fromAddress(args[1] as int);
+          isolate._modelInputSize = isolate._interpreter!.getInputTensors().first.shape[1];
+          isolate._labels = args[2] as List<String>;
+
+          sendPort.send({'code': _Command.ready});
+        } else {
+          await isolate._handleCommand(message);
+        }
+      }
     });
   }
 
@@ -137,16 +273,6 @@ class _DetectorIsolate {
     final args = command['args'];
 
     switch (code) {
-      case _Command.init:
-        final rootIsolateToken = args[0] as RootIsolateToken;
-        BackgroundIsolateBinaryMessenger.ensureInitialized(rootIsolateToken);
-
-        _interpreter = Interpreter.fromAddress(args[1] as int);
-        _modelInputSize = _interpreter!.getInputTensors().first.shape[1];
-        _labels = args[2] as List<String>;
-
-        _sendPort.send({'code': _Command.ready});
-        break;
       case _Command.detect:
         _sendPort.send({'code': _Command.busy});
         _processImage(args[0] as CameraImage);
@@ -189,18 +315,15 @@ class _DetectorIsolate {
       final conversionTime = DateTime.now().millisecondsSinceEpoch - startTime;
       final preprocessStart = DateTime.now().millisecondsSinceEpoch;
 
-      // [디버깅] 원본 이미지 정보 출력
       debugPrint('원본 이미지 정보: ${image.width} x ${image.height}, 포맷: ${image.format}');
 
       final preprocessResult = ImageConverter.preprocessImageWithPadding(image, _modelInputSize);
       final processedImage = preprocessResult.tensor;
 
-      // [디버깅] 전처리된 이미지 차원 및 샘플 값 확인
       debugPrint('전처리된 이미지 차원: ${processedImage.length} x ${processedImage[0].length} x ${processedImage[0][0].length}');
       debugPrint('이미지 샘플 픽셀 값 (0,0): ${processedImage[0][0].toString()}');
       debugPrint('패딩 정보: scale=${preprocessResult.scale}, padX=${preprocessResult.padX}, padY=${preprocessResult.padY}');
 
-      // [디버깅] 마지막 픽셀 값도 확인 (정규화 확인용)
       final lastY = processedImage.length - 1;
       final lastX = processedImage[0].length - 1;
       debugPrint('이미지 샘플 픽셀 값 ($lastX,$lastY): ${processedImage[lastY][lastX].toString()}');

@@ -19,7 +19,12 @@ class ImageConverter {
     if (cameraImage.format.group == ImageFormatGroup.yuv420) {
       image = _convertYUV420ToImage(cameraImage);
     } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
-      image = _convertBGRA8888ToImage(cameraImage);
+      image = img_lib.Image.fromBytes(
+        width: cameraImage.width,
+        height: cameraImage.height,
+        bytes: cameraImage.planes[0].bytes.buffer,
+        order: img_lib.ChannelOrder.rgba,
+      );
     } else if (cameraImage.format.group == ImageFormatGroup.jpeg) {
       image = _convertJPEGToImage(cameraImage);
     } else if (cameraImage.format.group == ImageFormatGroup.nv21) {
@@ -78,20 +83,8 @@ class ImageConverter {
     return image;
   }
 
-  static img_lib.Image _convertBGRA8888ToImage(CameraImage cameraImage) {
-    final bytes = cameraImage.planes[0].bytes;
-
-    return img_lib.Image.fromBytes(
-      width: cameraImage.width,
-      height: cameraImage.height,
-      bytes: bytes.buffer,
-      order: img_lib.ChannelOrder.rgba,
-    );
-  }
-
   static img_lib.Image _convertJPEGToImage(CameraImage cameraImage) {
     final bytes = cameraImage.planes[0].bytes;
-
     return img_lib.decodeJpg(bytes)!;
   }
 

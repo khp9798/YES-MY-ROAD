@@ -73,6 +73,9 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
       await _cameraController!.initialize();
       await _cameraController!.setFlashMode(FlashMode.off);
 
+      await _cameraController!.setFocusMode(FocusMode.auto);
+      await _cameraController!.setExposureMode(ExposureMode.auto);
+
       if (_cameraController!.value.isInitialized) {
         ScreenUtils.setPreviewSize(_cameraController!.value.previewSize!);
       }
