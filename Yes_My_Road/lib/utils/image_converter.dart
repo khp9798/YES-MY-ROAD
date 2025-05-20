@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img_lib;
 import 'dart:io' show Platform;
 
@@ -13,6 +14,14 @@ class PreprocessResult {
 }
 
 class ImageConverter {
+  // 디바이스 방향을 저장할 정적 변수 추가
+  static DeviceOrientation currentOrientation = DeviceOrientation.portraitUp;
+
+  // 방향 설정 메서드 추가
+  static void setOrientation(DeviceOrientation orientation) {
+    currentOrientation = orientation;
+  }
+
   static Future<img_lib.Image?> convertCameraImageToImage(CameraImage cameraImage) async {
     img_lib.Image? image;
 
@@ -31,8 +40,27 @@ class ImageConverter {
       image = _convertNV21ToImage(cameraImage);
     }
 
+    // 회전 로직 수정
     if (image != null && Platform.isAndroid) {
-      image = img_lib.copyRotate(image, angle: 90);
+      // 디바이스 방향에 따라 적절하게 이미지 회전
+      switch (currentOrientation) {
+        case DeviceOrientation.portraitUp:
+        // 세로 모드 (기본) - 90도 회전
+          image = img_lib.copyRotate(image, angle: 90);
+          break;
+        case DeviceOrientation.landscapeLeft:
+        // 가로 왼쪽 - 원본 유지
+        // 이미 정상 작동한다면 회전하지 않음
+          break;
+        case DeviceOrientation.landscapeRight:
+        // 가로 오른쪽 - 180도 회전
+          image = img_lib.copyRotate(image, angle: 180);
+          break;
+        case DeviceOrientation.portraitDown:
+        // 세로 아래 - 270도 회전
+          image = img_lib.copyRotate(image, angle: 270);
+          break;
+      }
     }
 
     return image;

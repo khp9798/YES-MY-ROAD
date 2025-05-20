@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 
 class ApiService {
-  final String baseUrl = 'http://45.12.114.100:12956/api';
+  final String baseUrl = 'http://43.200.186.24/api';
 
   Future<bool> reportRoadDefect(
       double longitude,
@@ -15,14 +15,14 @@ class ApiService {
       File imageFile,
       ) async {
     try {
-      final uri = Uri.parse('$baseUrl/detection');
+      final uri = Uri.parse('$baseUrl/upload');
 
       var request = http.MultipartRequest('POST', uri);
 
       request.fields['longitude'] = longitude.toString();
       request.fields['latitude'] = latitude.toString();
-      request.fields['accuracy'] = accuracy.toString();
-      request.fields['timestamp'] = timestamp.toIso8601String();
+      // request.fields['accuracy'] = accuracy.toString();
+      // request.fields['timestamp'] = timestamp.toIso8601String();
 
       var imageStream = http.ByteStream(imageFile.openRead());
       var imageLength = await imageFile.length();
@@ -57,19 +57,19 @@ class ApiService {
       List<String> detectedObjects,
       ) async {
     try {
-      final uri = Uri.parse('$baseUrl/detection/detailed');
+      final uri = Uri.parse('$baseUrl/upload');
 
       var request = http.MultipartRequest('POST', uri);
 
-      request.fields['defectType'] = defectType;
+      // request.fields['defectType'] = defectType;
       request.fields['longitude'] = longitude.toString();
       request.fields['latitude'] = latitude.toString();
-      request.fields['accuracy'] = accuracy.toString();
-      request.fields['timestamp'] = timestamp.toIso8601String();
+      // request.fields['accuracy'] = accuracy.toString();
+      // request.fields['timestamp'] = timestamp.toIso8601String();
 
-      request.fields['speed'] = speed.toString();
-      request.fields['detectedObjects'] = jsonEncode(detectedObjects);
-      request.fields['mode'] = 'recording'; // 녹화 모드임을 명시
+      // request.fields['speed'] = speed.toString();
+      // request.fields['detectedObjects'] = jsonEncode(detectedObjects);
+      // request.fields['mode'] = 'recording'; // 녹화 모드임을 명시
 
       var imageStream = http.ByteStream(imageFile.openRead());
       var imageLength = await imageFile.length();

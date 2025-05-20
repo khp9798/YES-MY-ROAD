@@ -99,7 +99,7 @@ class HomeScreen extends StatelessWidget {
                             colors: [Colors.white, Colors.lightBlueAccent],
                           ).createShader(bounds),
                           child: const Text(
-                            'SafeWay',
+                            'Yes, My Road',
                             style: TextStyle(
                               fontSize: 32,
                               fontWeight: FontWeight.bold,

@@ -6,10 +6,12 @@ import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:intl/intl.dart';
+import 'package:flutter/services.dart';
 import '../main.dart';
 import '../services/speed_based_detection_service.dart';
 import '../services/local_storage_service.dart';
 import '../utils/screen_utils.dart';
+import '../utils/image_converter.dart';
 import '../models/local_detection_record.dart';
 
 class RecordingDetectionScreen extends StatefulWidget {
@@ -38,6 +40,7 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
     _initializeCamera();
 
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -49,11 +52,44 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 여기서 방향 업데이트 호출
+    _updateOrientation();
+  }
+
+  void _updateOrientation() {
+    if (mounted) {
+      try {
+        final orientation = MediaQuery.of(context).orientation;
+        if (orientation == Orientation.portrait) {
+          ImageConverter.setOrientation(DeviceOrientation.portraitUp);
+        } else {
+          ImageConverter.setOrientation(DeviceOrientation.landscapeLeft);
+        }
+        debugPrint('디바이스 방향 업데이트: ${ImageConverter.currentOrientation}');
+      } catch (e) {
+        // MediaQuery가 아직 준비되지 않은 경우
+        debugPrint('방향 설정 오류: $e - 기본 방향 사용');
+      }
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    // 화면 크기나 방향이 변경될 때 호출됨
+    _updateOrientation();
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.inactive) {
       _stopRecording();
     } else if (state == AppLifecycleState.resumed) {
       _initializeCamera();
+      // 앱이 다시 시작될 때 방향 업데이트
+      _updateOrientation();
     }
   }
 
@@ -72,7 +108,6 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
     try {
       await _cameraController!.initialize();
       await _cameraController!.setFlashMode(FlashMode.off);
-
       await _cameraController!.setFocusMode(FocusMode.auto);
       await _cameraController!.setExposureMode(ExposureMode.auto);
 

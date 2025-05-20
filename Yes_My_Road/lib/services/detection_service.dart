@@ -232,7 +232,7 @@ class _FrameTask {
 
 class _DetectorIsolate {
   final SendPort _sendPort;
-  int _modelInputSize = 224;
+  int _modelInputSize = 480;
   Interpreter? _interpreter;
   List<String>? _labels;
 

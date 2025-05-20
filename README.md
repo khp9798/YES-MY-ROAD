@@ -71,7 +71,7 @@ lib/
 │   ├── detection_screen.dart     # 실시간 감지 화면
 │   ├── recording_detection_screen.dart # 녹화 모드 화면
 │   └── record_management_screen.dart # 기록 관리 화면
-├── services/                     # 비즈니스 로직
+├── services/
 │   ├── api_service.dart          # API 통신
 │   ├── detection_service.dart    # 기본 감지 서비스
 │   ├── speed_based_detection_service.dart # 속도 기반 감지
