@@ -54,7 +54,6 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // 여기서 방향 업데이트 호출
     _updateOrientation();
   }
 
@@ -69,7 +68,6 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
         }
         debugPrint('디바이스 방향 업데이트: ${ImageConverter.currentOrientation}');
       } catch (e) {
-        // MediaQuery가 아직 준비되지 않은 경우
         debugPrint('방향 설정 오류: $e - 기본 방향 사용');
       }
     }
@@ -77,8 +75,6 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
 
   @override
   void didChangeMetrics() {
-    super.didChangeMetrics();
-    // 화면 크기나 방향이 변경될 때 호출됨
     _updateOrientation();
   }
 
@@ -88,7 +84,6 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
       _stopRecording();
     } else if (state == AppLifecycleState.resumed) {
       _initializeCamera();
-      // 앱이 다시 시작될 때 방향 업데이트
       _updateOrientation();
     }
   }
@@ -161,61 +156,71 @@ class _RecordingDetectionScreenState extends State<RecordingDetectionScreen> wit
   }
 
   Future<void> _saveRecordToLocal(Uint8List imageData, Map<String, dynamic> results) async {
-    Position position;
     try {
-      position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-        timeLimit: const Duration(seconds: 2),
+      bool isLandscape = results['isLandscape'] ?? false;
+      String directionInfo = isLandscape ? "landscape" : "portrait";
+
+      String timestamp = DateFormat('yyyyMMdd_HHmmss_SSS').format(DateTime.now());
+      String directory = (await getApplicationDocumentsDirectory()).path;
+      String fileName = '$directory/road_record_${directionInfo}_$timestamp.jpg';
+
+      File imageFile = await ImageConverter.saveImageWithCorrectOrientation(
+          imageData,
+          customFileName: fileName
       );
+
+      Position position;
+      try {
+        position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 2),
+        );
+      } catch (e) {
+        debugPrint('위치 정보 획득 실패: $e');
+        position = Position(
+            longitude: 0,
+            latitude: 0,
+            timestamp: DateTime.now(),
+            accuracy: -1,
+            altitude: 0,
+            altitudeAccuracy: 0,
+            heading: 0,
+            headingAccuracy: 0,
+            speed: 0,
+            speedAccuracy: 0,
+            floor: 0,
+            isMocked: false
+        );
+      }
+
+      List<String> detectedClasses = results['cls'] ?? [];
+      String defectType = _determineDefectType(detectedClasses);
+
+      LocalDetectionRecord record = LocalDetectionRecord(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        imageFile: imageFile,
+        position: position,
+        timestamp: DateTime.now(),
+        defectType: defectType,
+        speed: _currentSpeed,
+        detectedObjects: detectedClasses,
+        boundingBoxes: results['box'] ?? [],
+        confidenceScores: results['conf'] ?? [],
+      );
+
+      bool saved = await _storageService.saveRecord(record);
+
+      if (saved) {
+        setState(() {
+          _savedCount++;
+        });
+        debugPrint('기록 저장 성공: ${record.defectType} at ${record.speed.toStringAsFixed(1)} km/h, 파일: ${imageFile.path}');
+        debugPrint('이미지 크기: ${await imageFile.length()} 바이트, 방향: $directionInfo');
+      } else {
+        debugPrint('기록 저장 실패');
+      }
     } catch (e) {
-      debugPrint('위치 정보 획득 실패: $e');
-      position = Position(
-          longitude: 0,
-          latitude: 0,
-          timestamp: DateTime.now(),
-          accuracy: -1,
-          altitude: 0,
-          altitudeAccuracy: 0,
-          heading: 0,
-          headingAccuracy: 0,
-          speed: 0,
-          speedAccuracy: 0,
-          floor: 0,
-          isMocked: false
-      );
-    }
-
-    String timestamp = DateFormat('yyyyMMdd_HHmmss_SSS').format(DateTime.now());
-    String directory = (await getApplicationDocumentsDirectory()).path;
-    String fileName = 'road_record_$timestamp.jpg';
-    File imageFile = File('$directory/$fileName');
-
-    await imageFile.writeAsBytes(imageData);
-
-    List<String> detectedClasses = results['cls'] ?? [];
-    String defectType = _determineDefectType(detectedClasses);
-
-    LocalDetectionRecord record = LocalDetectionRecord(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      imageFile: imageFile,
-      position: position,
-      timestamp: DateTime.now(),
-      defectType: defectType,
-      speed: _currentSpeed,
-      detectedObjects: detectedClasses,
-      boundingBoxes: results['box'] ?? [],
-      confidenceScores: results['conf'] ?? [],
-    );
-
-    bool saved = await _storageService.saveRecord(record);
-
-    if (saved) {
-      setState(() {
-        _savedCount++;
-      });
-      debugPrint('기록 저장 성공: ${record.defectType} at ${record.speed.toStringAsFixed(1)} km/h');
-    } else {
-      debugPrint('기록 저장 실패');
+      debugPrint('이미지 저장 및 처리 오류: $e');
     }
   }
 

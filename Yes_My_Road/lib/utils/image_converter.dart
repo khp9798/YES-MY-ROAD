@@ -2,7 +2,12 @@ import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img_lib;
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, File;
+import 'package:flutter/material.dart';
+import 'package:sensors_plus/sensors_plus.dart';
+import 'dart:math' as math;
+import 'package:path_provider/path_provider.dart';
+import 'package:intl/intl.dart';
 
 class PreprocessResult {
   final List<List<List<double>>> tensor;
@@ -14,52 +19,117 @@ class PreprocessResult {
 }
 
 class ImageConverter {
-  // 디바이스 방향을 저장할 정적 변수 추가
   static DeviceOrientation currentOrientation = DeviceOrientation.portraitUp;
 
-  // 방향 설정 메서드 추가
+  static int _sensorOrientation = 90;
+
   static void setOrientation(DeviceOrientation orientation) {
     currentOrientation = orientation;
+    debugPrint('방향 설정됨: $orientation');
+  }
+
+  static void setSensorOrientation(int orientation) {
+    _sensorOrientation = orientation;
+    debugPrint('센서 방향 설정됨: $orientation');
+  }
+
+  static Future<DeviceOrientation> getAccurateDeviceOrientation() async {
+    try {
+      final AccelerometerEvent event = await accelerometerEvents.first;
+
+      final double x = event.x;
+      final double y = event.y;
+
+      if (x.abs() > y.abs()) {
+        return x > 0
+            ? DeviceOrientation.landscapeRight
+            : DeviceOrientation.landscapeLeft;
+      } else {
+        return y > 0
+            ? DeviceOrientation.portraitUp
+            : DeviceOrientation.portraitDown;
+      }
+    } catch (e) {
+      return DeviceOrientation.portraitUp;
+    }
   }
 
   static Future<img_lib.Image?> convertCameraImageToImage(CameraImage cameraImage) async {
     img_lib.Image? image;
 
-    if (cameraImage.format.group == ImageFormatGroup.yuv420) {
-      image = _convertYUV420ToImage(cameraImage);
-    } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
-      image = img_lib.Image.fromBytes(
-        width: cameraImage.width,
-        height: cameraImage.height,
-        bytes: cameraImage.planes[0].bytes.buffer,
-        order: img_lib.ChannelOrder.rgba,
-      );
-    } else if (cameraImage.format.group == ImageFormatGroup.jpeg) {
-      image = _convertJPEGToImage(cameraImage);
-    } else if (cameraImage.format.group == ImageFormatGroup.nv21) {
-      image = _convertNV21ToImage(cameraImage);
-    }
+    try {
+      if (cameraImage.format.group == ImageFormatGroup.yuv420) {
+        image = _convertYUV420ToImage(cameraImage);
+      } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
+        image = img_lib.Image.fromBytes(
+          width: cameraImage.width,
+          height: cameraImage.height,
+          bytes: cameraImage.planes[0].bytes.buffer,
+          order: img_lib.ChannelOrder.rgba,
+        );
+      } else if (cameraImage.format.group == ImageFormatGroup.jpeg) {
+        image = _convertJPEGToImage(cameraImage);
+      } else if (cameraImage.format.group == ImageFormatGroup.nv21) {
+        image = _convertNV21ToImage(cameraImage);
+      }
 
-    // 회전 로직 수정
-    if (image != null && Platform.isAndroid) {
-      // 디바이스 방향에 따라 적절하게 이미지 회전
+      if (image != null) {
+        image = _rotateImageBasedOnOrientation(image);
+      }
+
+      return image;
+    } catch (e) {
+      print('이미지 변환 오류: $e');
+      return null;
+    }
+  }
+
+  static img_lib.Image _rotateImageBasedOnOrientation(img_lib.Image image) {
+    if (Platform.isAndroid) {
       switch (currentOrientation) {
         case DeviceOrientation.portraitUp:
-        // 세로 모드 (기본) - 90도 회전
-          image = img_lib.copyRotate(image, angle: 90);
-          break;
+          return img_lib.copyRotate(image, angle: 90);
+
         case DeviceOrientation.landscapeLeft:
-        // 가로 왼쪽 - 원본 유지
-        // 이미 정상 작동한다면 회전하지 않음
-          break;
+          if (image.height > image.width) {
+            return img_lib.copyRotate(image, angle: 0);
+          }
+          return image;
+
         case DeviceOrientation.landscapeRight:
-        // 가로 오른쪽 - 180도 회전
-          image = img_lib.copyRotate(image, angle: 180);
-          break;
+          if (image.height > image.width) {
+            return img_lib.copyRotate(image, angle: 180);
+          }
+          return image;
+
         case DeviceOrientation.portraitDown:
-        // 세로 아래 - 270도 회전
-          image = img_lib.copyRotate(image, angle: 270);
-          break;
+          return img_lib.copyRotate(image, angle: 270);
+
+        default:
+          return image;
+      }
+    } else if (Platform.isIOS) {
+      switch (currentOrientation) {
+        case DeviceOrientation.portraitUp:
+          return image;
+
+        case DeviceOrientation.landscapeLeft:
+          if (image.height > image.width) {
+            return img_lib.copyRotate(image, angle: -90);
+          }
+          return image;
+
+        case DeviceOrientation.landscapeRight:
+          if (image.height > image.width) {
+            return img_lib.copyRotate(image, angle: 90);
+          }
+          return image;
+
+        case DeviceOrientation.portraitDown:
+          return img_lib.copyRotate(image, angle: 180);
+
+        default:
+          return image;
       }
     }
 
@@ -145,6 +215,79 @@ class ImageConverter {
 
   static Uint8List encodeImageToJpeg(img_lib.Image image, {int quality = 85}) {
     return Uint8List.fromList(img_lib.encodeJpg(image, quality: quality));
+  }
+
+  static Future<File> saveImageWithCorrectOrientation(Uint8List imageData, {String? customFileName}) async {
+    try {
+      final img_lib.Image? decodedImage = img_lib.decodeJpg(imageData);
+      if (decodedImage == null) throw Exception('이미지 디코딩 실패');
+
+      debugPrint('원본 이미지 크기: ${decodedImage.width}x${decodedImage.height}');
+
+      bool isImageLandscape = decodedImage.width > decodedImage.height;
+
+      bool shouldBeLandscape =
+          currentOrientation == DeviceOrientation.landscapeLeft ||
+              currentOrientation == DeviceOrientation.landscapeRight;
+
+      debugPrint('현재 이미지 방향: ${isImageLandscape ? "가로" : "세로"}, 앱 방향: ${shouldBeLandscape ? "가로" : "세로"}');
+
+      img_lib.Image processedImage;
+
+      if (shouldBeLandscape) {
+        if (!isImageLandscape) {
+          processedImage = img_lib.copyRotate(decodedImage, angle: -90);
+          debugPrint('가로 모드: 이미지를 가로로 회전');
+        } else {
+          processedImage = decodedImage;
+          debugPrint('가로 모드: 이미 가로 이미지');
+        }
+      } else {
+        if (isImageLandscape) {
+          processedImage = img_lib.copyRotate(decodedImage, angle: 90);
+          debugPrint('세로 모드: 이미지를 세로로 회전');
+        } else {
+          processedImage = decodedImage;
+          debugPrint('세로 모드: 이미 세로 이미지');
+        }
+      }
+
+      if (currentOrientation == DeviceOrientation.portraitDown) {
+        processedImage = img_lib.copyRotate(processedImage, angle: 180);
+        debugPrint('거꾸로 세로 모드: 추가 180도 회전');
+      } else if (currentOrientation == DeviceOrientation.landscapeRight) {
+        if (isImageLandscape || processedImage.width > processedImage.height) {
+          processedImage = img_lib.copyRotate(processedImage, angle: 180);
+          debugPrint('오른쪽 가로 모드: 가로 이미지 추가 회전');
+        }
+      }
+
+      String timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      String directory = (await getApplicationDocumentsDirectory()).path;
+      String fileName = customFileName ?? '$directory/image_$timestamp.jpg';
+
+      final file = File(fileName);
+      await file.writeAsBytes(Uint8List.fromList(
+          img_lib.encodeJpg(processedImage, quality: 90)
+      ));
+
+      debugPrint('이미지 저장 완료: $fileName (${processedImage.width}x${processedImage.height})');
+
+      return file;
+    } catch (e) {
+      debugPrint('이미지 저장 오류: $e');
+
+      String timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      String directory = (await getApplicationDocumentsDirectory()).path;
+      String fileName = customFileName ?? '$directory/fallback_$timestamp.jpg';
+
+      final file = File(fileName);
+      await file.writeAsBytes(imageData);
+
+      debugPrint('오류로 인한 원본 저장: $fileName');
+
+      return file;
+    }
   }
 
   static PreprocessResult preprocessImageWithPadding(img_lib.Image image, int targetSize) {

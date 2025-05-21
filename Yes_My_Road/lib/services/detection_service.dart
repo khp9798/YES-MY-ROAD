@@ -232,7 +232,7 @@ class _FrameTask {
 
 class _DetectorIsolate {
   final SendPort _sendPort;
-  int _modelInputSize = 480;
+  int _modelInputSize = 224;
   Interpreter? _interpreter;
   List<String>? _labels;
 
@@ -292,6 +292,9 @@ class _DetectorIsolate {
         final results = _analyzeImage(image, startTime);
 
         if (results['conf'].any((double c) => c > 0.25)) {
+          bool isLandscape = image.width > image.height;
+          results['isLandscape'] = isLandscape;
+
           Uint8List jpegImage = ImageConverter.encodeImageToJpeg(image);
           results['jpegImage'] = jpegImage;
         }

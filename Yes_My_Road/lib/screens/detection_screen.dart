@@ -7,6 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter/services.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 import '../main.dart';
 import '../services/api_service.dart';
 import '../services/detection_service.dart';
@@ -27,6 +28,7 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
   DetectionService? _detectionService;
   StreamSubscription? _subscription;
   StreamSubscription? _positionSubscription;
+  StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
   final ApiService _apiService = ApiService();
   final FrameRateTester _frameRateTester = FrameRateTester();
 
@@ -60,6 +62,11 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
+    // 가속도계 리스너 추가
+    _accelerometerSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
+      _updateOrientationFromSensor(event);
+    });
+
     _initializeSystem();
     _uploadQueue.stream.listen(_uploadDetection);
 
@@ -92,16 +99,61 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
     _updateOrientation();
   }
 
+  // 센서 이벤트로부터 방향 감지 및 업데이트
+  void _updateOrientationFromSensor(AccelerometerEvent event) {
+    // 가속도계 기반 방향 감지 (가로/세로 및 좌/우)
+    final double x = event.x;
+    final double y = event.y;
+
+    // 값이 너무 작으면 무시 (노이즈 제거)
+    if (x.abs() < 1.0 && y.abs() < 1.0) return;
+
+    DeviceOrientation newOrientation;
+
+    if (x.abs() > y.abs()) {
+      newOrientation = x > 0
+          ? DeviceOrientation.landscapeRight
+          : DeviceOrientation.landscapeLeft;
+    } else {
+      newOrientation = y > 0
+          ? DeviceOrientation.portraitUp
+          : DeviceOrientation.portraitDown;
+    }
+
+    // 이전 방향과 다른 경우에만 업데이트
+    if (newOrientation != ImageConverter.currentOrientation) {
+      setState(() {
+        ImageConverter.setOrientation(newOrientation);
+        debugPrint('센서 기반 방향 업데이트: ${ImageConverter.currentOrientation}');
+      });
+    }
+  }
+
   void _updateOrientation() {
     if (mounted) {
       try {
         final orientation = MediaQuery.of(context).orientation;
+
+        // 기본 방향 설정
+        DeviceOrientation defaultOrientation;
         if (orientation == Orientation.portrait) {
-          ImageConverter.setOrientation(DeviceOrientation.portraitUp);
+          defaultOrientation = DeviceOrientation.portraitUp;
         } else {
-          ImageConverter.setOrientation(DeviceOrientation.landscapeLeft);
+          // 가로 모드에서는 가속도계 데이터로 구분 필요
+          // 기본값으로 landscapeLeft 설정
+          defaultOrientation = DeviceOrientation.landscapeLeft;
         }
-        debugPrint('디바이스 방향 업데이트: ${ImageConverter.currentOrientation}');
+
+        // 가속도계 데이터로 더 정확한 방향 감지
+        ImageConverter.getAccurateDeviceOrientation().then((detectedOrientation) {
+          setState(() {
+            ImageConverter.setOrientation(detectedOrientation);
+            debugPrint('디바이스 방향 업데이트: ${ImageConverter.currentOrientation}');
+          });
+        }).catchError((_) {
+          // 오류 시 MediaQuery 기반 방향 사용
+          ImageConverter.setOrientation(defaultOrientation);
+        });
       } catch (e) {
         // MediaQuery가 아직 준비되지 않은 경우
         debugPrint('방향 설정 오류: $e - 기본 방향 사용');
@@ -145,13 +197,23 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
       return;
     }
 
-    _cameraController = CameraController(
-      cameras[0],
-      ResolutionPreset.high,
-      enableAudio: false,
-    );
+    // 카메라 선택 및 기본 방향 설정
+    final CameraDescription camera = cameras[0];
+
+    // 카메라 센서 방향 설정
+    ImageConverter.setSensorOrientation(camera.sensorOrientation);
+    debugPrint('카메라 센서 방향: ${camera.sensorOrientation}');
 
     try {
+      _cameraController = CameraController(
+        camera,
+        ResolutionPreset.high,
+        enableAudio: false,
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.yuv420
+            : ImageFormatGroup.bgra8888,
+      );
+
       await _cameraController!.initialize();
       await _cameraController!.setFlashMode(FlashMode.off);
       await _cameraController!.setFocusMode(FocusMode.auto);
@@ -219,7 +281,9 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
     setState(() {
       if (results.containsKey('jpegImage')) {
         Uint8List imageData = results['jpegImage'];
-        _saveAndUploadDetection(imageData);
+        // 이미지 방향 정보 가져오기 (있는 경우)
+        bool isLandscape = results['isLandscape'] ?? false;
+        _saveAndUploadDetection(imageData, isLandscape);
       }
 
       _detectedClasses = results['cls'] ?? [];
@@ -228,39 +292,45 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
     });
   }
 
-  Future<void> _saveAndUploadDetection(Uint8List imageData) async {
-    String timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-    String directory = (await getApplicationDocumentsDirectory()).path;
-    String fileName = 'road_defect_$timestamp.jpg';
-    File imageFile = File('$directory/$fileName');
-
-    await imageFile.writeAsBytes(imageData);
-
-    Position position;
+  Future<void> _saveAndUploadDetection(Uint8List imageData, bool isLandscape) async {
     try {
-      position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.medium,
-        timeLimit: const Duration(seconds: 5),
-      );
-    } catch (e) {
-      debugPrint('위치 정보 획득 실패: $e');
-      position = Position(
-          longitude: 0,
-          latitude: 0,
-          timestamp: DateTime.now(),
-          accuracy: -1,
-          altitude: 0,
-          altitudeAccuracy: 0,
-          heading: 0,
-          headingAccuracy: 0,
-          speed: 0,
-          speedAccuracy: 0,
-          floor: 0,
-          isMocked: false
-      );
-    }
+      // 방향 정보가 포함된 파일명 생성
+      String timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      String directory = (await getApplicationDocumentsDirectory()).path;
+      String directionInfo = isLandscape ? "landscape" : "portrait";
+      String fileName = '$directory/road_defect_${directionInfo}_$timestamp.jpg';
 
-    try {
+      // 향상된 저장 메서드 호출
+      File imageFile = await ImageConverter.saveImageWithCorrectOrientation(
+          imageData,
+          customFileName: fileName
+      );
+
+      // 위치정보 및 업로드 처리는 기존과 동일
+      Position position;
+      try {
+        position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.medium,
+          timeLimit: const Duration(seconds: 5),
+        );
+      } catch (e) {
+        debugPrint('위치 정보 획득 실패: $e');
+        position = Position(
+            longitude: 0,
+            latitude: 0,
+            timestamp: DateTime.now(),
+            accuracy: -1,
+            altitude: 0,
+            altitudeAccuracy: 0,
+            heading: 0,
+            headingAccuracy: 0,
+            speed: 0,
+            speedAccuracy: 0,
+            floor: 0,
+            isMocked: false
+        );
+      }
+
       String defectType = _determineDefectType(_detectedClasses);
       _uploadQueue.add(DetectionResult(
         imageFile: imageFile,
@@ -273,7 +343,7 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
         _detectionCount++;
       });
     } catch (e) {
-      debugPrint('감지 결과 처리 오류: $e');
+      debugPrint('이미지 저장 및 처리 오류: $e');
     }
   }
 
@@ -485,6 +555,7 @@ class _DetectionScreenState extends State<DetectionScreen> with WidgetsBindingOb
   void dispose() {
     _monitorTimer?.cancel();
     _stopDetection();
+    _accelerometerSubscription?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _frameRateTester.stopTesting();
     _uploadQueue.close();
