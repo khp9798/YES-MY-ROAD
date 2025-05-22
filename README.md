@@ -58,8 +58,6 @@ GPU 서버에서는 더 강력하고 정교한 고성능 YOLO AI 모델이 해�
 # 3. 파트별 상세 설명 
 ### [ Front-End ] : [FE 바로가기](./FE/README.md)
 
-### [ APP ] : [APP 바로가기](./APP/README.md)
-
 ### [ Back-End ] : [BE 바로가기](./api/README.md)
 
 ### [ Infra ] : [KAFKA 바로가기](./reactive/README.md) ,  [IMAGE 바로가기](./image_api/README.md)
@@ -67,6 +65,8 @@ GPU 서버에서는 더 강력하고 정교한 고성능 YOLO AI 모델이 해�
 ### [ DATA ] : [DATA 바로가기](./DT/README.md)
 
 ### [ AI ] : [AI 바로가기](./ai/README.md)
+
+### [ APP ] : [APP 바로가기](./APP/README.md)
 
 <br></br>
 
