@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.safeway"
+    namespace = "com.example.YesMyRoad"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "27.0.12077973"
 

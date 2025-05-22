@@ -54,8 +54,11 @@ cd safeway
 # 종속성 설치
 flutter pub get
 
-# 애플리케이션 실행
-flutter run
+# 애플리케이션 빌드
+flutter build apk --release
+
+# 빌드된 어플 경로
+APP/build/app/outputs/flutter-apk/app-release.apk
 ```
 
 ## 폴더 구조
