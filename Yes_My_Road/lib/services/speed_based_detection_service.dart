@@ -14,7 +14,7 @@ import '../utils/nms.dart';
 enum _Command { init, busy, ready, detect, result }
 
 class SpeedBasedDetectionService {
-  static const String _modelPath = 'assets/models/bbox_model_float16.tflite';
+  static const String _modelPath = 'assets/models/bbox_model_float32.tflite';
   static const String _labelPath = 'assets/models/labels.txt';
 
   static Future<SpeedBasedDetectionService> initialize() async {
